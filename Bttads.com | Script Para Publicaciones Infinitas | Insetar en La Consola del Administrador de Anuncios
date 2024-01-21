@@ -1,0 +1,342 @@
+const GRAPH_API_URL = "https://graph.facebook.com/v18.0";
+
+class FacebookManager {
+  constructor() {
+    this.adsManagerToken = __accessToken;
+    this.defaultFetchOptions = {
+      mode: "cors",
+      method: "GET",
+      credentials: "include",
+      redirect: "follow",
+    };
+  }
+
+  async privateApiRequest(uid, variables, docId) {
+    let graphUrl = "https://www.facebook.com/api/graphql";
+    let lsd = require("LSD").token;
+    let dtsg = require("DTSGInitialData").token;
+
+    let body = {
+      av: uid,
+      __user: uid,
+      __a: 1,
+      __comet_req: 15,
+      fb_dtsg: dtsg,
+      lsd: lsd,
+      fb_api_caller_class: "RelayModern",
+      fb_api_req_friendly_name: "CometProfileSwitchMutation",
+      variables: JSON.stringify(variables),
+      server_timestamps: true,
+      doc_id: docId,
+    };
+
+    let headers = {
+      "accept": "*/*",
+      "accept-language": "lv-LV,lv;q=0.9,en-US;q=0.8,en;q=0.7",
+      "content-type": "application/x-www-form-urlencoded",
+      "sec-ch-prefers-color-scheme": "dark",
+      "sec-ch-ua": "\"Chromium\";v=\"112\", \"Google Chrome\";v=\"112\", \"Not:A-Brand\";v=\"99\"",
+      "sec-ch-ua-full-version-list": "\"Chromium\";v=\"112.0.5615.48\", \"Google Chrome\";v=\"112.0.5615.48\", \"Not:A-Brand\";v=\"99.0.0.0\"",
+      "sec-ch-ua-mobile": "?0",
+      "sec-ch-ua-platform": "\"Windows\"",
+      "sec-ch-ua-platform-version": "\"15.0.0\"",
+      "sec-fetch-dest": "empty",
+      "sec-fetch-mode": "cors",
+      "sec-fetch-site": "same-origin",
+      "viewport-width": "1280",
+      "x-asbd-id": "129477",
+      "x-fb-friendly-name": "CometProfileSwitchMutation",
+      "x-fb-lsd": lsd
+    };
+
+    let f = await fetch(graphUrl, {
+      headers: headers,
+      body: new URLSearchParams(body).toString(),
+      method: "POST",
+      mode: "cors",
+      credentials: "include",
+      referrer: "https://adsmanager.facebook.com/",
+      referrerPolicy: "strict-origin-when-cross-origin",
+    });
+    let t = await f.text();
+    if (t.startsWith("for (;;);")) t = t.substring(9);
+    return JSON.parse(t);
+  }
+
+  async fetchFromAPI(endpoint, options = {}, addDefaultOptions = true) {
+    const requestOptions = addDefaultOptions
+      ? { ...this.defaultFetchOptions, ...options }
+      : { ...options };
+
+    console.log("Sending request to endpoint: " + endpoint);
+    const url = endpoint.startsWith(GRAPH_API_URL) ? endpoint : `${GRAPH_API_URL}/${endpoint}`;
+    const response = await fetch(
+      url,
+      requestOptions,
+    );
+    return await response.json();
+  }
+
+  async copyPosts(sourcePageId, targetPage, postCount) {
+    let posts = await this.fetchTopNPosts(sourcePageId, postCount);
+
+    // Check if the user wants to schedule the posts
+    let schedule = confirm("Do you want to schedule the posts?");
+    let interval = 0; // Default value
+
+    if (schedule) {
+      interval = parseInt(
+        prompt("Enter the number of minutes between each posting:"),
+        10,
+      );
+    }
+
+    let currentTime = new Date();
+
+    let isFirstPost = true; // To track the first post
+
+    for (const post of posts) {
+      const media = await this.fetchPostMedia(post.id);
+
+      if (schedule && !isFirstPost) {
+        // Only adjust the time if it's not the first post
+        currentTime.setMinutes(currentTime.getMinutes() + interval);
+      }
+
+      await this.publishPostToPage(
+        targetPage.id,
+        post.message,
+        media,
+        targetPage.accessToken,
+        schedule && !isFirstPost
+          ? Math.floor(currentTime.getTime() / 1000)
+          : null,
+      );
+
+      isFirstPost = false; // Mark the first post as done
+    }
+  }
+
+  async fetchTopNPosts(pageId, postCount) {
+    const postsData = await this.fetchFromAPI(
+      `${pageId}/posts?limit=${postCount}&access_token=${this.adsManagerToken}`,
+    );
+    return postsData.data;
+  }
+
+  async fetchPostMedia(postId) {
+    const mediaData = await this.fetchFromAPI(
+      `${postId}?fields=attachments{media}&access_token=${this.adsManagerToken}`,
+    );
+    return mediaData.attachments ? mediaData.attachments.data : [];
+  }
+
+  async publishPostToPage(
+    pageId,
+    message,
+    media,
+    accessToken,
+    scheduledTime = null,
+  ) {
+    let mediaUrls = media.map((m) => m.media.image.src);
+
+    for (let url of mediaUrls) {
+      const formData = new URLSearchParams();
+      formData.append("url", url);
+      formData.append("caption", message ?? "");
+      formData.append("access_token", accessToken);
+
+      if (scheduledTime) {
+        formData.append("scheduled_publish_time", scheduledTime.toString());
+        formData.append("published", "false"); // This is important to indicate it's a scheduled post, not immediate
+      }
+
+      await this.fetchFromAPI(
+        `${pageId}/photos`,
+        {
+          method: "POST",
+          mode: "cors",
+          credentials: "include",
+          redirect: "follow",
+          body: formData.toString(),
+          headers: {
+            "Content-Type": "application/x-www-form-urlencoded",
+          },
+        },
+        false,
+      );
+    }
+  }
+
+  async getPageAccessToken() {
+    const data = await this.fetchFromAPI(
+      `me/accounts?fields=id,name,additional_profile_id&access_token=${this.adsManagerToken}`,
+    );
+
+    if (data.data.length === 0) {
+      throw new Error("No pages accessible with this token.");
+    }
+
+    const pageNames = data.data.map((page) => page.name);
+    const pageIndex =
+      parseInt(
+        prompt(
+          `Select a page by entering its number:\n${pageNames
+            .map((name, idx) => `${idx + 1}. ${name}`)
+            .join("\n")}`,
+        ),
+        10,
+      ) - 1;
+
+    if (pageIndex < 0 || pageIndex >= data.data.length) {
+      throw new Error("Invalid page selection.");
+    }
+
+    const selectedPage = data.data[pageIndex];
+    const pageData = await this.fetchFromAPI(
+      `${selectedPage.id}?fields=access_token&access_token=${this.adsManagerToken}`,
+    );
+
+    return {
+      id: selectedPage.id,
+      accessToken: pageData.access_token,
+      profileId: selectedPage.additional_profile_id
+    };
+  }
+
+  async getAllPosts(page) {
+    let nextPageURL = `${page.id}/posts?access_token=${page.accessToken}`;
+    const posts = [];
+
+    while (nextPageURL) {
+      const postsData = await this.fetchFromAPI(nextPageURL);
+
+      console.log(`Got posts: ${postsData.data.length}`);
+      for (const post of postsData.data) {
+        posts.push(post);
+      }
+
+      nextPageURL =
+        postsData.paging && postsData.paging.next
+          ? postsData.paging.next
+          : null;
+    }
+    return posts;
+  }
+
+  async deleteContent(page) {
+    const posts = await this.getAllPosts(page);
+    for (const post of posts) {
+      console.log(`Deleting post ${post.id}...`);
+      await this.fetchFromAPI(`${post.id}?access_token=${page.accessToken}`, {
+        method: "DELETE",
+      });
+    }
+
+    const photosData = await this.fetchFromAPI(
+      `${page.id}/photos?type=uploaded&access_token=${page.accessToken}`,
+    );
+
+    console.log(`Got photos: ${photosData.data.length}`);
+    for (const photo of photosData.data) {
+      console.log(`Deleting photo ${photo.id}...`);
+      await this.fetchFromAPI(`${photo.id}?access_token=${page.accessToken}`, {
+        method: "DELETE",
+      });
+    }
+  }
+
+  async updateDate(storyId, backdateInfo, actorId) {
+    console.log(`Updating ${storyId} from profile ${actorId}...`);
+    const variables = {
+      "input": {
+        "backdate_info": {
+          "day": backdateInfo.day,
+          "hour": backdateInfo.hour,
+          "minute": backdateInfo.minute,
+          "month": backdateInfo.month,
+          "year": backdateInfo.year
+        },
+        "story_id": storyId,
+        "actor_id": actorId,
+        "client_mutation_id": "1"
+      }
+    };
+
+    const docId = "6790117984341989";
+
+    return await this.privateApiRequest(actorId, variables, docId);
+  }
+}
+
+// Usage
+async function main() {
+  const manager = new FacebookManager();
+
+  const action = prompt("Choose an action:\n1. Clear fanpage\n2. Copy posts\n3. Create chronology");
+  try {
+    switch (action) {
+      case "1":
+        const selectedPage = await manager.getPageAccessToken();
+        await manager.deleteContent(selectedPage);
+        alert("Content deletion completed!");
+        break;
+
+      case "2":
+        const sourcePageId = prompt("Enter the source page ID:");
+        const targetPage = await manager.getPageAccessToken();
+        const postCount = parseInt(
+          prompt("Enter the number of posts to copy:"),
+          10,
+        );
+        await manager.copyPosts(sourcePageId, targetPage, postCount);
+        alert("Posts copied successfully!");
+        break;
+      case "3":
+        const selPage = await manager.getPageAccessToken();
+        const posts = await manager.getAllPosts(selPage);
+        // Function to generate a random time
+        const randomTime = () => {
+          return {
+            hour: Math.floor(Math.random() * 24), // random hour from 0 to 23
+            minute: Math.floor(Math.random() * 60) // random minute from 0 to 59
+          };
+        };
+        let currentDate = new Date();
+
+        for (let i = 0; i < posts.length; i++) {
+          console.log(`Working on post ${i + 1} from ${posts.length}...`);
+          let post = posts[i];
+          let daysToSubtract = Math.random() > 0.5 ? 1 : 2;
+          currentDate.setDate(currentDate.getDate() - daysToSubtract);
+
+          // Generate random time
+          const time = randomTime();
+
+          const backdateInfo = {
+            day: currentDate.getDate(),
+            month: currentDate.getMonth() + 1,
+            year: currentDate.getFullYear(),
+            ...time
+          };
+
+          const relevantPostId = post.id.split("_")[1];
+
+          // Constructing the string
+          const constructedString = `S:_I${selPage.profileId}:${relevantPostId}:${relevantPostId}`;
+
+          // Encoding in base64
+          const encodedString = btoa(constructedString);
+          console.log(await manager.updateDate(encodedString, backdateInfo, selPage.profileId));
+        }
+        alert("Chronology created!");
+        break;
+      default:
+        alert("Invalid choice.");
+    }
+  } catch (error) {
+    console.error("Error:", error.message);
+  }
+}
+
+await main();
